@@ -8,7 +8,7 @@ echo Building Do Tiep Dia - Arduino Data Logger...
 echo.
 
 REM Output directory
-set OUTPUT_DIR=C:\Users\quyqu\OneDrive\Máy tính\new_do_tiep_dia
+set OUTPUT_DIR=c:\Users\quyqu\OneDrive\Máy tính\new_do_tiep_dia
 
 REM Create output directory if not exists
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
@@ -16,7 +16,7 @@ if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 REM Remove old build artifacts
 if exist dist rmdir /s /q dist
 if exist build rmdir /s /q build
-if exist *.spec del *.spec
+if exist "*.spec" del *.spec
 
 REM Build with PyInstaller
 .venv\Scripts\pyinstaller ^
@@ -24,9 +24,8 @@ REM Build with PyInstaller
     --windowed ^
     --name "Do Tiep Dia - Arduino Data Logger" ^
     --icon=logo.ico ^
-    --specpath=. ^
     --distpath="%OUTPUT_DIR%" ^
-    --workpath=build ^
+    --workpath="%cd%\build" ^
     arduino_gui.py
 
 echo.
