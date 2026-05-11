@@ -11,6 +11,9 @@ import sys
 import os
 import subprocess
 import tempfile
+from PIL import Image, ImageDraw
+import pystray
+import winreg
 
 class ArduinoDataLogger:
     # CH340 VID/PID
@@ -19,7 +22,7 @@ class ArduinoDataLogger:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("Do Tiep Dia - Arduino Data Logger")
+        self.root.title("Do Tiep Dia")
         self.root.geometry("400x500")
         self.root.resizable(True, True)
         
@@ -30,6 +33,11 @@ class ArduinoDataLogger:
         self.running = False
         self.user_disconnected = False
         self.monitor_thread = None
+        self.failed_password_attempts = 0
+        self.exit_password = "1234"
+        self.exit_locked = False
+        self.is_minimized = False
+        self.tray_thread = None
         
         # Setup auto-start on first run
         self.setup_autostart_shortcut()
@@ -46,46 +54,99 @@ class ArduinoDataLogger:
         # Start auto-reconnect monitor
         self.start_auto_monitor()
         
-        # Window close handler
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-    
-    def setup_autostart_shortcut(self):
-        """Create Windows Startup shortcut on first run"""
+        # ===== CHỐNG TẮT =====
+        # Gán WM_DELETE_WINDOW -> ẩn xuống thay vì tắt
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        
+        # Chặn phím tắt đóng cửa sổ thường gặp - cũng chỉ ẩn xuống
+        self.root.bind('<Alt-F4>',        lambda e: self.hide_to_tray())
+        self.root.bind('<Control-w>',     lambda e: self.hide_to_tray())
+        self.root.bind('<Control-q>',     lambda e: self.hide_to_tray())
+        self.root.bind('<Control-F4>',    lambda e: self.hide_to_tray())
+        self.root.bind('<F4>',            lambda e: self.hide_to_tray())
+        
+        # Alt+X -> Tắt ứng dụng nhanh (với xác nhận mật khẩu)
+        self.root.bind('<Alt-x>',         lambda e: self.exit_with_password())
+        self.root.bind('<Alt-X>',         lambda e: self.exit_with_password())
+        # ======================
+        
+        # Setup System Tray
+        self.tray_icon = None
+        self.setup_tray_icon()
+
+    def create_tray_icon_image(self):
+        """Create a simple icon for the system tray"""
+        size = (64, 64)
+        image = Image.new('RGB', size, color='white')
+        draw = ImageDraw.Draw(image)
+        # Draw a simple circle to represent connected/monitoring status
+        draw.ellipse([10, 10, 54, 54], fill='blue', outline='navy')
+        draw.text((20, 25), "DTD", fill='white')
+        return image
+
+    def setup_tray_icon(self):
+        """Setup system tray icon with menu"""
         try:
-            startup_dir = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
-            shortcut_path = os.path.join(startup_dir, "Do Tiep Dia.lnk")
+            icon_image = self.create_tray_icon_image()
+            menu = (
+                pystray.MenuItem("Hiển thị", self.show_from_tray),
+                pystray.MenuItem("Ẩn", self.hide_to_tray_from_menu),
+                pystray.MenuItem("Tắt ứng dụng", self.on_closing),
+            )
+            self.tray_icon = pystray.Icon("Do Tiep Dia", icon_image, menu=menu)
+        except Exception as e:
+            pass  # Tray setup optional
+
+    def hide_to_tray_from_menu(self, icon=None, item=None):
+        """Hide to tray from menu (wrapper)"""
+        self.hide_to_tray()
+
+    def show_from_tray(self, icon=None, item=None):
+        """Show window from tray"""
+        self.is_minimized = False
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus()
+
+    def start_tray_in_thread(self):
+        """Start tray icon in a separate thread"""
+        if self.tray_icon:
+            try:
+                self.tray_icon.run()
+            except Exception as e:
+                pass
+
+    def setup_autostart_shortcut(self):
+        """Đăng ký ứng dụng tự động khởi động qua Registry"""
+        try:
+            # Lấy đường dẫn đến EXE (nếu là PyInstaller thì dùng sys.executable, nếu là EXE thì dùng sys.argv[0])
+            if getattr(sys, 'frozen', False):
+                exe_path = sys.executable
+            else:
+                # Nếu chạy từ Python script, thì không đăng ký
+                return
             
-            # Only create if doesn't exist
-            if not os.path.exists(shortcut_path):
-                exe_path = sys.executable  # Path to running exe
-                
-                # Create VBScript to generate shortcut
-                vbs_content = f"""Set oWS = WScript.CreateObject("WScript.Shell")
-Set oLink = oWS.CreateShortcut("{shortcut_path}")
-oLink.TargetPath = "{exe_path}"
-oLink.WorkingDirectory = "{os.path.dirname(exe_path)}"
-oLink.WindowStyle = 1
-oLink.Save
-"""
-                
-                # Write and run VBScript
-                vbs_file = os.path.join(tempfile.gettempdir(), f"setup_{os.getpid()}.vbs")
-                with open(vbs_file, 'w', encoding='utf-8') as f:
-                    f.write(vbs_content)
-                
-                subprocess.run(['cscript.exe', '/nologo', vbs_file], capture_output=True)
-                
-                # Clean up
-                try:
-                    os.remove(vbs_file)
-                except:
-                    pass
-        except:
-            pass  # Silently fail if auto-start setup fails
+            # Tên entry trong Registry
+            app_name = "Do Tiep Dia"
+            
+            # Mở Registry key cho Startup
+            reg_key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE
+            )
+            
+            # Thêm entry để tự động chạy
+            winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, exe_path)
+            winreg.CloseKey(reg_key)
+            
+        except Exception as e:
+            # Yên tĩnh thất bại - không phải lỗi nghiêm trọng
+            pass
     
     def setup_ui(self):
         """Setup the user interface"""
-        # Top control frame - more compact
         control_frame = ttk.Frame(self.root)
         control_frame.pack(padx=8, pady=8, fill=tk.X)
         
@@ -104,7 +165,6 @@ oLink.Save
         self.disconnect_btn = ttk.Button(row1, text="Ngắt", command=self.disconnect_arduino, state=tk.DISABLED, width=10)
         self.disconnect_btn.pack(side=tk.LEFT, padx=(0, 8))
         
-        # Status label on the right
         self.status_label = ttk.Label(row1, text="⚫ Chưa kết nối", font=("Arial", 8, "bold"), foreground="red")
         self.status_label.pack(side=tk.RIGHT)
         
@@ -118,12 +178,12 @@ oLink.Save
         
         ttk.Button(row2, text="Lưu", command=self.save_settings, width=4).pack(side=tk.LEFT)
         
-        # Row 3: Auto-connect checkbox
+        # Row 3: Auto-connect checkbox & Exit button
         row3 = ttk.Frame(control_frame)
         row3.pack(fill=tk.X)
         
         ttk.Checkbutton(
-            row3, 
+            row3,
             text="Tự động kết nối khi khởi động",
             variable=self.auto_connect_var,
             command=self.save_settings
@@ -133,18 +193,15 @@ oLink.Save
         display_frame = ttk.Frame(self.root)
         display_frame.pack(padx=8, pady=(5, 8), fill=tk.BOTH, expand=True)
         
-        # Top info bar with line number
         info_frame = ttk.Frame(display_frame)
         info_frame.pack(fill=tk.X, pady=(0, 5))
         
         self.line_label = ttk.Label(info_frame, text="Line: --", font=("Arial", 10, "bold"), foreground="blue")
         self.line_label.pack(side=tk.LEFT, padx=5)
         
-        # Table for data (full width)
         table_frame = ttk.LabelFrame(display_frame, text="Dữ liệu Thiết Bị", padding=5)
         table_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Treeview for data display
         columns = ("Thiết Bị", "Giá Trị")
         self.tree = ttk.Treeview(table_frame, columns=columns, height=20, show="headings")
         self.tree.column("Thiết Bị", width=150, anchor="center")
@@ -152,51 +209,35 @@ oLink.Save
         self.tree.heading("Thiết Bị", text="Thiết Bị")
         self.tree.heading("Giá Trị", text="Giá Trị (V)")
         
-        # Scrollbar for tree
         scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Start polling for queue messages
-        # Removed: no longer needed
-        pass
     
     def format_data_display(self, json_data):
         """Format JSON data for table display"""
         try:
-            # Clear existing items
             for item in self.tree.get_children():
                 self.tree.delete(item)
             
-            # Extract line_id if available
             line_id = json_data.get('line_id', '--')
             self.line_label.config(text=f"Line: {line_id}")
             
-            # Extract data
             if isinstance(json_data, dict):
                 if 'data' in json_data and isinstance(json_data['data'], list):
-                    # Format: [{"machine_id": 1, "voltage": 206.5}, ...]
                     for item_data in json_data['data']:
                         machine_id = item_data.get('machine_id', 'N/A')
                         voltage = item_data.get('voltage', 0)
-                        
-                        # Format voltage with 1 decimal place
                         voltage_str = f"{voltage:.1f}" if isinstance(voltage, (int, float)) else str(voltage)
-                        
                         self.tree.insert("", "end", values=(f"Machine {machine_id}", voltage_str))
                         
             return True
         except Exception as e:
             return False
 
-    
     def get_available_ports(self):
-        """Get list of available COM ports with CH340"""
         ports = []
-        all_ports = serial.tools.list_ports.comports()
-        
-        for port in all_ports:
+        for port in serial.tools.list_ports.comports():
             ports.append({
                 'device': port.device,
                 'description': port.description,
@@ -204,17 +245,14 @@ oLink.Save
                 'pid': port.pid,
                 'is_ch340': port.vid == self.CH340_VID and port.pid == self.CH340_PID
             })
-        
         return ports
     
     def update_com_ports(self):
-        """Update COM port list"""
         ports = self.get_available_ports()
         port_list = [p['device'] for p in ports]
         
         self.com_combo['values'] = port_list
         
-        # Auto-select CH340 if available
         ch340_ports = [p for p in ports if p['is_ch340']]
         if ch340_ports and not self.is_connected:
             self.com_var.set(ch340_ports[0]['device'])
@@ -222,7 +260,6 @@ oLink.Save
             self.com_var.set(port_list[0])
     
     def connect_arduino(self):
-        """Connect to Arduino"""
         com_port = self.com_var.get()
         
         if not com_port:
@@ -245,13 +282,9 @@ oLink.Save
             self.connect_btn.config(state=tk.DISABLED)
             self.disconnect_btn.config(state=tk.NORMAL)
             self.com_combo.config(state=tk.DISABLED)
-            
-            # Disable server entry when connected
             self.server_entry.config(state=tk.DISABLED)
-            
             self.status_label.config(text=f"🟢 Kết nối {com_port}", foreground="green")
             
-            # Start reading thread
             self.thread = threading.Thread(target=self.read_serial_data, daemon=True)
             self.thread.start()
             
@@ -261,7 +294,6 @@ oLink.Save
             self.status_label.config(text="⚫ Lỗi kết nối", foreground="red")
     
     def disconnect_arduino(self):
-        """Disconnect from Arduino"""
         self.user_disconnected = True
         self.running = False
         if self.ser:
@@ -271,14 +303,10 @@ oLink.Save
         self.connect_btn.config(state=tk.NORMAL)
         self.disconnect_btn.config(state=tk.DISABLED)
         self.com_combo.config(state="readonly")
-        
-        # Enable server entry when disconnected
         self.server_entry.config(state=tk.NORMAL)
-        
         self.status_label.config(text="⚫ Chưa kết nối", foreground="red")
     
     def read_serial_data(self):
-        """Read data from Arduino in separate thread"""
         buffer = ""
         
         while self.running and self.ser:
@@ -287,7 +315,6 @@ oLink.Save
                     data = self.ser.read(self.ser.in_waiting).decode('utf-8', errors='ignore')
                     buffer += data
                     
-                    # Process complete lines
                     while '\n' in buffer:
                         line, buffer = buffer.split('\n', 1)
                         line = line.strip()
@@ -295,15 +322,10 @@ oLink.Save
                         if line:
                             try:
                                 json_data = json.loads(line)
-                                
-                                # Display in table
                                 self.root.after(0, lambda d=json_data: self.format_data_display(d))
-                                
-                                # Send to server if configured
                                 self.send_to_server(json_data)
                             except json.JSONDecodeError:
                                 pass
-                
                 else:
                     threading.Event().wait(0.1)
                     
@@ -313,12 +335,10 @@ oLink.Save
                 break
     
     def start_auto_monitor(self):
-        """Start auto-monitor thread for detecting Arduino"""
         self.monitor_thread = threading.Thread(target=self.auto_monitor_arduino, daemon=True)
         self.monitor_thread.start()
     
     def auto_monitor_arduino(self):
-        """Continuously monitor and auto-connect to Arduino with CH340"""
         reconnect_delay = 0
         
         while True:
@@ -352,36 +372,32 @@ oLink.Save
                 threading.Event().wait(1)
                     
             except Exception as e:
-                print(f"Monitor error: {e}")
                 threading.Event().wait(2)
     
     def send_to_server(self, data):
-        """Send data to server"""
         server_url = self.server_url_var.get()
         if not server_url or server_url == "http://127.0.0.1:8000/api/voltages":
             return
         
         try:
-            response = requests.post(server_url, json=data, timeout=2)
+            requests.post(server_url, json=data, timeout=2)
         except:
             pass
     
     def save_settings(self):
-        """Save settings to config file"""
         try:
             settings = {
                 'server_url': self.server_url_var.get(),
                 'auto_connect': self.auto_connect_var.get(),
-                'last_com': self.com_var.get()
+                'last_com': self.com_var.get(),
+                'exit_password': self.exit_password
             }
-            
             with open('config.json', 'w', encoding='utf-8') as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
-        except Exception as e:
+        except:
             pass
     
     def load_settings(self):
-        """Load settings from config file"""
         self.auto_connect_var = tk.BooleanVar(value=True)
         self.server_url_var = tk.StringVar(value="http://127.0.0.1:8000/api/voltages")
         self.com_var = tk.StringVar()
@@ -392,18 +408,131 @@ oLink.Save
                 self.server_url_var.set(settings.get('server_url', "http://127.0.0.1:8000/api/voltages"))
                 self.auto_connect_var.set(settings.get('auto_connect', True))
                 self.com_var.set(settings.get('last_com', ''))
+                self.exit_password = settings.get('exit_password', '1234')
         except FileNotFoundError:
-            # First run - save default settings with auto_connect = True
             self.save_settings()
-    
-    def on_closing(self):
-        """Handle window closing"""
-        self.user_disconnected = True  # Mark disconnection as user-initiated
+
+    # ================================================================== #
+    #  CHỐNG TẮT – Dialog xác nhận mật khẩu                             #
+    # ================================================================== #
+    def show_password_dialog(self):
+        """Hiện hộp thoại nhập mật khẩu. Trả về True nếu đúng."""
+
+        # Nếu đã bị khóa do nhập sai 3 lần
+        if self.exit_locked:
+            messagebox.showerror(
+                "Đã bị khóa",
+                "Chức năng tắt ứng dụng đã bị khóa.\n"
+                "Dùng Task Manager (Ctrl+Shift+Esc) để tắt."
+            )
+            return False
+
+        # Tạo dialog con
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Xác nhận tắt ứng dụng")
+        dialog.geometry("320x160")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()                   # chặn tương tác cửa sổ chính
+        dialog.focus_force()
+
+        # Ngăn chính dialog bị đóng bằng nút X của nó
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        ttk.Label(dialog, text="Nhập mật khẩu để tắt ứng dụng:",
+                  font=("Arial", 10)).pack(pady=12)
+
+        password_var = tk.StringVar()
+        pw_entry = ttk.Entry(dialog, textvariable=password_var,
+                             show="*", width=28, font=("Arial", 10))
+        pw_entry.pack(pady=4)
+        pw_entry.focus()
+
+        # Dùng list để truyền kết quả ra ngoài closure
+        result = [False]
+
+        def check_password():
+            if password_var.get() == self.exit_password:
+                result[0] = True
+                self.failed_password_attempts = 0
+                dialog.destroy()
+            else:
+                self.failed_password_attempts += 1
+                remaining = 3 - self.failed_password_attempts
+
+                if remaining <= 0:
+                    self.exit_locked = True
+                    dialog.destroy()
+                    messagebox.showerror(
+                        "Đã bị khóa",
+                        "Sai mật khẩu 3 lần!\n"
+                        "Chức năng tắt ứng dụng đã bị khóa.\n"
+                        "Dùng Task Manager (Ctrl+Shift+Esc) để tắt."
+                    )
+                    return
+
+                messagebox.showerror(
+                    "Sai mật khẩu",
+                    f"Mật khẩu không đúng! Còn {remaining} lần thử."
+                )
+                password_var.set("")
+                pw_entry.focus()
+
+        pw_entry.bind('<Return>', lambda e: check_password())
+        ttk.Button(dialog, text="  Xác nhận  ", command=check_password).pack(pady=10)
+
+        # Chặn Alt-F4 trong dialog
+        dialog.bind('<Alt-F4>', lambda e: "break")
+
+        # Chờ dialog đóng (blocking)
+        self.root.wait_window(dialog)
+        return result[0]
+
+    def exit_with_password(self):
+        """Alt+X hotkey - Tắt ứng dụng nhanh với xác nhận mật khẩu"""
+        if self.exit_locked:
+            messagebox.showerror(
+                "Bị khóa",
+                "Chức năng tắt đã bị khóa vì sai mật khẩu 3 lần!\n"
+                "Dùng Task Manager (Ctrl+Shift+Esc) để tắt."
+            )
+            return
+        
+        # Show password dialog
+        if not self.show_password_dialog():
+            return
+        
+        # Password correct - close app
+        self._do_close()
+
+    def _do_close(self):
+        """Thực hiện đóng ứng dụng (không kiểm tra mật khẩu)"""
+        self.user_disconnected = True
         self.running = False
         if self.is_connected and self.ser:
-            self.disconnect_arduino()
+            try:
+                self.ser.close()
+            except:
+                pass
         self.save_settings()
+        self.root.quit()
         self.root.destroy()
+
+    def on_closing(self):
+        """Xử lý sự kiện tắt ứng dụng – yêu cầu mật khẩu."""
+        if not self.show_password_dialog():
+            # Sai mật khẩu hoặc bị khóa -> không tắt
+            return
+        
+        # Mật khẩu đúng -> dọn dẹp và thoát
+        self._do_close()
+
+    def hide_to_tray(self, event=None):
+        """Chặn đóng window - nút X không hoạt động"""
+        # Chặn event đóng cửa sổ, bạn không thể tắt ứng dụng này bằng nút X
+        # Nếu muốn tắt: mở Task Manager → tìm "Do Tiep Dia" → End Task
+        return "break"  # Chặn hoàn toàn event mặc định
+
 
 def main():
     root = tk.Tk()
