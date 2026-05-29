@@ -12,7 +12,11 @@ import os
 import subprocess
 import tempfile
 from PIL import Image, ImageDraw
-import pystray
+try:
+    import pystray
+    PYSTRAY_AVAILABLE = True
+except ImportError:
+    PYSTRAY_AVAILABLE = False
 import winreg
 
 class ArduinoDataLogger:
@@ -25,6 +29,15 @@ class ArduinoDataLogger:
         self.root.title("Do Tiep Dia")
         self.root.geometry("400x500")
         self.root.resizable(True, True)
+        
+        # Config file path (works with both PyInstaller exe and Python script)
+        if getattr(sys, 'frozen', False):
+            # Running as PyInstaller executable
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            # Running as Python script
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_file = os.path.join(app_dir, 'config.json')
         
         self.ser = None
         self.is_connected = False
@@ -86,6 +99,9 @@ class ArduinoDataLogger:
 
     def setup_tray_icon(self):
         """Setup system tray icon with menu"""
+        if not PYSTRAY_AVAILABLE:
+            return  # Pystray not available, skip tray setup
+        
         try:
             icon_image = self.create_tray_icon_image()
             menu = (
@@ -376,7 +392,7 @@ class ArduinoDataLogger:
     
     def send_to_server(self, data):
         server_url = self.server_url_var.get()
-        if not server_url or server_url == "http://127.0.0.1:8000/api/voltages":
+        if not server_url or server_url == "http://192.168.100.168:84/api/voltages":
             return
         
         try:
@@ -392,20 +408,20 @@ class ArduinoDataLogger:
                 'last_com': self.com_var.get(),
                 'exit_password': self.exit_password
             }
-            with open('config.json', 'w', encoding='utf-8') as f:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except:
             pass
     
     def load_settings(self):
         self.auto_connect_var = tk.BooleanVar(value=True)
-        self.server_url_var = tk.StringVar(value="http://127.0.0.1:8000/api/voltages")
+        self.server_url_var = tk.StringVar(value="http://192.168.100.168:84/api/voltages")
         self.com_var = tk.StringVar()
         
         try:
-            with open('config.json', 'r', encoding='utf-8') as f:
+            with open(self.config_file, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
-                self.server_url_var.set(settings.get('server_url', "http://127.0.0.1:8000/api/voltages"))
+                self.server_url_var.set(settings.get('server_url', "http://192.168.100.168:84/api/voltages"))
                 self.auto_connect_var.set(settings.get('auto_connect', True))
                 self.com_var.set(settings.get('last_com', ''))
                 self.exit_password = settings.get('exit_password', '1234')
@@ -464,10 +480,7 @@ class ArduinoDataLogger:
                     self.exit_locked = True
                     dialog.destroy()
                     messagebox.showerror(
-                        "Đã bị khóa",
-                        "Sai mật khẩu 3 lần!\n"
-                        "Chức năng tắt ứng dụng đã bị khóa.\n"
-                        "Dùng Task Manager (Ctrl+Shift+Esc) để tắt."
+                        "Sai mật khẩu 3 lần!,tắt ứng dụng đã bị khóa\n"
                     )
                     return
 
