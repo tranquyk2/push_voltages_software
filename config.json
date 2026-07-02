@@ -1,5 +1,6 @@
 {
-  "server_url": "http://127.0.0.1:8000/api/voltages",
+  "server_url": "http://192.168.100.168:84/api/voltages",
   "auto_connect": true,
-  "last_com": "COM5"
+  "last_com": "COM5",
+  "exit_password": "1234"
 }
